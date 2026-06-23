@@ -1,0 +1,87 @@
+  # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+required_packages <- c("tidyverse", "sf", "terra", "spThin")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+cat("--- 1. Generating Built-in Sample Occurrence Data... \n")
+# We generate 45 dummy GPS coordinates for a target species.
+# Notice how they are clustered to simulate sampling bias near trails.
+set.seed(42)
+sample_data <- data.frame(
+  Species = "Target_Species",
+  Longitude = c(rnorm(15, 79.45, 0.01), rnorm(20, 79.50, 0.02), runif(10, 79.40, 79.60)),
+  Latitude = c(rnorm(15, 29.35, 0.01), rnorm(20, 29.40, 0.02), runif(10, 29.30, 29.50))
+)
+cat(paste("Total initial raw records:", nrow(sample_data), "\n"))
+
+# ---- 2. SPATIAL THINNING (REMOVING BIAS) ----
+cat("--- 2. Running spatial thinning to reduce sampling bias... \n")
+# Target spatial thinning distance (in Kilometers)
+THIN_DIST_KM <- 2.0 
+
+thin_results <- spThin::thin(
+  loc.data = sample_data, 
+  lat.col = "Latitude", 
+  long.col = "Longitude", 
+  spec.col = "Species", 
+  thin.par = THIN_DIST_KM, 
+  reps = 1, 
+  locs.thinned.list.return = TRUE, 
+  write.files = FALSE, 
+  write.log.file = FALSE
+)
+
+thinned_data <- thin_results[[1]]
+thinned_data$Presence <- 1 # Mark as presence points
+
+cat(paste("Total records after", THIN_DIST_KM, "km spatial thinning:", nrow(thinned_data), "\n"))
+
+# ---- 3. ENVIRONMENTAL RASTER PREPARATION ----
+cat("--- 3. Generating Environmental Rasters (Dummy Data)... \n")
+# Creates a bounding box around our points to simulate an environment
+ext_box <- terra::ext(min(thinned_data$Longitude)-0.1, max(thinned_data$Longitude)+0.1, 
+                      min(thinned_data$Latitude)-0.1, max(thinned_data$Latitude)+0.1)
+
+# Simulating Temperature and Elevation rasters
+r_temp <- terra::rast(ext_box, resolution = 0.01, vals = runif(400, 15, 25))
+r_elev <- terra::rast(ext_box, resolution = 0.01, vals = runif(400, 1000, 3000))
+names(r_temp) <- "Temperature"
+names(r_elev) <- "Elevation"
+env_stack <- c(r_temp, r_elev)
+
+# ---- 4. PSEUDO-ABSENCE (BACKGROUND) GENERATION ----
+cat("--- 4. Generating random background points (pseudo-absences)... \n")
+# Generate 500 random background points across the study extent for MaxEnt/GLM
+bg_points_matrix <- terra::spatSample(env_stack, size = 500, "random", xy = TRUE, na.rm = TRUE)
+bg_data <- as.data.frame(bg_points_matrix) %>%
+  rename(Longitude = x, Latitude = y) %>%
+  mutate(Species = "Background", Presence = 0) %>%
+  select(Longitude, Latitude, Presence)
+
+# Combine Presence and Background points
+all_points <- bind_rows(
+  select(thinned_data, Longitude, Latitude, Presence),
+  bg_data
+)
+
+# ---- 5. ENVIRONMENTAL EXTRACTION ----
+cat("--- 5. Extracting environmental data for all points... \n")
+points_vect <- terra::vect(all_points, geom = c("Longitude", "Latitude"), crs = "EPSG:4326")
+extracted_covs <- terra::extract(env_stack, points_vect, ID = FALSE)
+final_sdm_dataset <- bind_cols(all_points, extracted_covs) %>% drop_na()
+
+# ---- 6. VISUAL CONFIRMATION ----
+cat("--- 6. Generating visual confirmation plot... \n")
+# Plots the elevation raster, layers the background points, and highlights thinned presences
+plot(r_elev, main = "SDM Prep Complete: Presences (Red) vs Background (Black)")
+points(bg_data$Longitude, bg_data$Latitude, col = "black", pch = 16, cex = 0.6)
+points(thinned_data$Longitude, thinned_data$Latitude, col = "red", pch = 16, cex = 1.2)
+
+cat("\n=== WORKFLOW COMPLETE ===\n")
+cat("Your 'final_sdm_dataset' dataframe is ready for modeling and contains:\n")
+cat(paste("-", sum(final_sdm_dataset$Presence == 1), "Thinned Presences\n"))
+cat(paste("-", sum(final_sdm_dataset$Presence == 0), "Background Points\n"))
