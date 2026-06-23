@@ -10,7 +10,7 @@ invisible(lapply(required_packages, library, character.only = TRUE))
 
 # Set working directory to the folder containing this script and data
 ROOT_DIR <- getwd() 
-DATA_PATH <- ("C:\\Users\\voice\\Downloads\\sample_occupancy_data.csv")
+DATA_PATH <- ("sample_occupancy_data.csv")
 
 # ---- 1. DATA LOADING & PREPROCESSING ----
 cat("--- Loading camera trap detection data... \n")
