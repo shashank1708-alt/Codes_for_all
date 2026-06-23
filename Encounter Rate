@@ -1,0 +1,72 @@
+  # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+required_packages <- c("tidyverse", "knitr")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+ROOT_DIR <- getwd() 
+DATA_PATH <- ("sample_transect_data.csv")
+
+# ---- 1. DATA LOADING ----
+cat("--- Loading transect survey data... \n")
+
+if (!file.exists(DATA_PATH)) {
+  stop("Data file not found! Please ensure 'sample_transect_data.csv' is in your working directory.")
+}
+
+raw_data <- read.csv(DATA_PATH)
+
+# --- USER CONFIGURATION ---
+# Define the target species you want to calculate rates for
+TARGET_SPECIES <- "Red Panda"
+
+# Define the standardization metric (e.g., 10 for sightings per 10 km)
+STANDARDIZATION_KM <- 10
+# --------------------------
+
+# ---- 2. CALCULATING SURVEY EFFORT ----
+cat("--- Calculating total survey effort per administrative block... \n")
+
+# Calculate total kilometers walked per Reserve Forest/Block
+# We use distinct() in case multiple sightings occurred on the exact same transect walk
+effort_summary <- raw_data %>%
+  distinct(Survey_Date, Reserve_Forest, Transect_ID, Effort_km) %>%
+  group_by(Reserve_Forest) %>%
+  summarise(Total_Effort_km = sum(Effort_km, na.rm = TRUE), .groups = 'drop')
+
+# ---- 3. CALCULATING ENCOUNTER RATES ----
+cat(paste("--- Tallying sightings for:", TARGET_SPECIES, "...\n"))
+
+# Filter for the target species and sum the individual counts
+sightings_summary <- raw_data %>%
+  filter(str_trim(Species) == TARGET_SPECIES) %>%
+  group_by(Reserve_Forest) %>%
+  summarise(Total_Individuals = sum(Count, na.rm = TRUE), .groups = 'drop')
+
+# Merge effort and sightings, handling zero-sighting forests
+final_table <- effort_summary %>%
+  left_join(sightings_summary, by = "Reserve_Forest") %>%
+  mutate(Total_Individuals = replace_na(Total_Individuals, 0)) %>%
+  # Calculate Encounter Rate (ER)
+  mutate(Encounter_Rate = (Total_Individuals / Total_Effort_km) * STANDARDIZATION_KM) %>%
+  # Round metrics for clean publication formatting
+  mutate(across(where(is.numeric), ~round(., 2))) %>%
+  # Rename for the final output table
+  rename(`Reserve Forest` = Reserve_Forest,
+         `Total Effort (km)` = Total_Effort_km,
+         `Total Sightings` = Total_Individuals,
+         `ER (per 10km)` = Encounter_Rate)
+
+# ---- 4. OUTPUT & EXPORT ----
+cat("\n=== PUBLICATION READY ENCOUNTER RATE TABLE ===\n")
+print(knitr::kable(final_table, format = "markdown"))
+
+# Export to CSV for easy copy-pasting into Word/Excel
+export_path <- file.path(ROOT_DIR, "Publication_Encounter_Rates.csv")
+write.csv(final_table, export_path, row.names = FALSE)
+
+cat(paste("\nResults successfully exported to:", export_path, "\n"))
+cat("--- Workflow Complete! ---\n")
