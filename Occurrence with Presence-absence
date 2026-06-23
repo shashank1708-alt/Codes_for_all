@@ -1,0 +1,111 @@
+ # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+required_packages <- c("tidyverse", "sf", "terra", "spThin")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+ROOT_DIR <- getwd() 
+DATA_PATH <- ("C:\\Users\\voice\\Downloads\\true_presence_absence_data.csv")
+
+cat("====================================================\n")
+cat("WORKING DIRECTORY (Your files will save here):\n")
+cat(">>", normalizePath(ROOT_DIR, mustWork = FALSE), "<<\n")
+cat("====================================================\n\n")
+
+# ---- 1. DATA LOADING & CLEANING ----
+cat("--- Loading True Presence/Absence data... \n")
+if (!file.exists(DATA_PATH)) stop("Data file not found! Please check the Working Directory printed above.")
+
+raw_data <- read.csv(DATA_PATH)
+
+clean_data <- raw_data %>%
+  drop_na(Longitude, Latitude) %>%
+  distinct(Longitude, Latitude, .keep_all = TRUE)
+
+cat(paste("Total initial unique records:", nrow(clean_data), "\n"))
+cat(paste("- Presences:", sum(clean_data$Status == "Presence"), "\n"))
+cat(paste("- Absences:", sum(clean_data$Status == "Absence"), "\n\n"))
+
+# ---- 2. SPATIAL THINNING (INDEPENDENT BY STATUS) ----
+cat("--- Running spatial thinning independently for Presences and Absences... \n")
+
+THIN_DIST_KM <- 2.0 
+
+# Split the data so spThin doesn't get confused by multiple categories
+pres_data <- clean_data %>% filter(Status == "Presence")
+abs_data  <- clean_data %>% filter(Status == "Absence")
+
+# 1. Thin the Presences
+cat("Thinning Presences...\n")
+thin_pres_results <- spThin::thin(
+  loc.data = pres_data, lat.col = "Latitude", long.col = "Longitude", spec.col = "Status", 
+  thin.par = THIN_DIST_KM, reps = 1, locs.thinned.list.return = TRUE, 
+  write.files = FALSE, write.log.file = FALSE
+)
+# Extract and manually recreate the 1 label
+thinned_pres <- thin_pres_results[[1]] %>% mutate(Presence_Numeric = 1)
+
+# 2. Thin the Absences
+cat("Thinning Absences...\n")
+thin_abs_results <- spThin::thin(
+  loc.data = abs_data, lat.col = "Latitude", long.col = "Longitude", spec.col = "Status", 
+  thin.par = THIN_DIST_KM, reps = 1, locs.thinned.list.return = TRUE, 
+  write.files = FALSE, write.log.file = FALSE
+)
+# Extract and manually recreate the 0 label
+thinned_abs <- thin_abs_results[[1]] %>% mutate(Presence_Numeric = 0)
+
+# 3. Stitch them back together for modeling
+thinned_data <- bind_rows(thinned_pres, thinned_abs)
+
+cat(paste("\nTotal records after", THIN_DIST_KM, "km spatial thinning:", nrow(thinned_data), "\n"))
+cat(paste("- Thinned Presences:", sum(thinned_data$Presence_Numeric == 1), "\n"))
+cat(paste("- Thinned Absences:", sum(thinned_data$Presence_Numeric == 0), "\n\n"))
+
+# ---- 3. ENVIRONMENTAL RASTER PREPARATION ----
+cat("--- Preparing environmental covariate rasters... \n")
+
+# >> WHEN USING YOUR OWN DATA, REPLACE THIS BLOCK WITH: <<
+# env_stack <- terra::rast(c("elevation.tif", "forest_cover.tif"))
+
+# --- DUMMY RASTER GENERATION (For out-of-the-box testing) ---
+ext_box <- terra::ext(min(thinned_data$Longitude)-0.1, max(thinned_data$Longitude)+0.1, 
+                      min(thinned_data$Latitude)-0.1, max(thinned_data$Latitude)+0.1)
+r_temp <- terra::rast(ext_box, resolution = 0.01, vals = runif(400, 15, 25))
+r_elev <- terra::rast(ext_box, resolution = 0.01, vals = runif(400, 1000, 3000))
+names(r_temp) <- "Temperature"
+names(r_elev) <- "Elevation"
+env_stack <- c(r_temp, r_elev)
+# ------------------------------------------------------------
+
+# ---- 4. ENVIRONMENTAL EXTRACTION ----
+cat("--- Extracting raster data for all coordinates... \n")
+
+# Notice we DO NOT generate background points here, as we have true absences
+points_vect <- terra::vect(thinned_data, geom = c("Longitude", "Latitude"), crs = "EPSG:4326")
+extracted_covs <- terra::extract(env_stack, points_vect, ID = FALSE)
+
+# Bind the extracted variables back to our coordinates
+final_sdm_dataset <- bind_cols(thinned_data, extracted_covs) %>% drop_na()
+
+# ---- 5. EXPORT & VISUAL CONFIRMATION ----
+export_path <- file.path(ROOT_DIR, "True_PA_SDM_Ready.csv")
+write.csv(final_sdm_dataset, export_path, row.names = FALSE)
+
+cat("\n=== DATA PREP COMPLETE ===\n")
+cat("Saved ready-to-model CSV file to exact location:\n")
+cat(paste(">>", normalizePath(export_path, mustWork = FALSE), "<<\n\n"))
+
+cat("--- Generating visual confirmation plot... \n")
+plot(r_elev, main = "True P/A Data: Thinned Presences (Red) vs Absences (Black Crosses)")
+
+# Plot true absences as black crosses
+absences <- final_sdm_dataset %>% filter(Presence_Numeric == 0)
+points(absences$Longitude, absences$Latitude, col = "black", pch = 4, cex = 1.0, lwd = 2)
+
+# Plot presences as solid red dots
+presences <- final_sdm_dataset %>% filter(Presence_Numeric == 1)
+points(presences$Longitude, presences$Latitude, col = "red", pch = 16, cex = 1.2)
