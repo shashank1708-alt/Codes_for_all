@@ -12,7 +12,7 @@ invisible(lapply(required_packages, library, character.only = TRUE))
 # Set working directory dynamically using relative paths
 # Buyers just change this single path to match their local project folder
 ROOT_DIR <- getwd() 
-DATA_PATH <- "C:\\Users\\voice\\Downloads\\sample_field_data.csv"
+DATA_PATH <- "sample_field_data.csv"
 
 # ---- 1. DATA LOADING & PREPROCESSING ----
 cat("--- Loading and preparing field dataset... \n")
