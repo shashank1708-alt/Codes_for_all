@@ -1,0 +1,113 @@
+
+  # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+required_packages <- c("tidyverse", "unmarked", "MuMIn")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Set working directory to the folder containing this script and data
+ROOT_DIR <- getwd() 
+DATA_PATH <- ("C:\\Users\\voice\\Downloads\\sample_occupancy_data.csv")
+
+# ---- 1. DATA LOADING & PREPROCESSING ----
+cat("--- Loading camera trap detection data... \n")
+
+if (!file.exists(DATA_PATH)) {
+  stop("Data file not found! Please ensure 'sample_occupancy_data.csv' is in your working directory.")
+}
+
+raw_data <- read.csv(DATA_PATH)
+
+# --- USER CONFIGURATION ---
+# Define which columns contain the 1s and 0s for daily detections
+DETECTION_COLS <- c("Day_1", "Day_2", "Day_3", "Day_4", "Day_5")
+
+# Define which columns contain the environmental site covariates
+SITE_COVS <- c("Elevation", "Bamboo_Cover", "Dist_to_Water")
+# --------------------------
+
+# Separate detection history (y) from site covariates
+y_matrix <- raw_data %>% select(all_of(DETECTION_COLS))
+site_covs <- raw_data %>% select(all_of(SITE_COVS))
+
+# Scale site covariates for model stability
+site_covs_scaled <- as.data.frame(scale(site_covs))
+
+cat("--- Compiling unmarkedFrame object... \n")
+# Create the specific object required by the 'unmarked' package
+umf <- unmarkedFrameOccu(y = y_matrix, siteCovs = site_covs_scaled)
+
+# Print a summary to ensure data loaded correctly
+summary(umf)
+
+# ---- 2. MODEL FITTING ----
+cat("\n--- Fitting Occupancy Models... \n")
+# Formula structure for occu(): ~DetectionCovariates ~OccupancyCovariates
+# This script assumes constant detection probability (~1) for simplicity, 
+# modeling covariates only on occupancy (psi).
+
+# 1. Null Model (No covariates affecting occupancy or detection)
+m_null <- occu(~1 ~1, data = umf)
+
+# 2. Single Covariate Models
+m_elev   <- occu(~1 ~Elevation, data = umf)
+m_bamboo <- occu(~1 ~Bamboo_Cover, data = umf)
+m_water  <- occu(~1 ~Dist_to_Water, data = umf)
+
+# 3. Global Model (All covariates affecting occupancy)
+m_global <- occu(~1 ~Elevation + Bamboo_Cover + Dist_to_Water, data = umf)
+
+# ---- 3. MODEL SELECTION (AICc) ----
+cat("--- Running Model Selection via AICc... \n")
+
+# Compile models into a fitList
+models <- fitList(
+  "Null" = m_null,
+  "Elevation" = m_elev,
+  "Bamboo" = m_bamboo,
+  "Water_Dist" = m_water,
+  "Global" = m_global
+)
+
+# Generate selection table based on AIC
+model_sel <- modSel(models)
+print(model_sel)
+
+cat("\n=== BEST MODEL SUMMARY ===\n")
+# Extract and summarize the top model
+best_model_name <- as.character(model_sel@Full$model[1])
+best_model <- models@fits[[best_model_name]]
+summary(best_model)
+
+# ---- 4. OCCUPANCY PREDICTION & PLOTTING ----
+cat("\n--- Generating Predictive Plot for Top Covariate... \n")
+
+# We will plot the relationship for the strongest covariate in the global model
+# (Requires user to manually change 'Bamboo_Cover' to their strongest predictor)
+TARGET_COVAR <- "Bamboo_Cover"
+
+# Create a sequence of values to predict over
+pred_data <- data.frame(
+  Elevation = 0, # Held at mean (scaled = 0)
+  Bamboo_Cover = seq(min(site_covs_scaled$Bamboo_Cover), max(site_covs_scaled$Bamboo_Cover), length.out = 100),
+  Dist_to_Water = 0 # Held at mean
+)
+
+# Predict occupancy (state) probability
+predictions <- predict(best_model, type = "state", newdata = pred_data)
+plot_data <- cbind(pred_data, predictions)
+
+# Save plot to working directory
+png(file.path(ROOT_DIR, "occupancy_probability_plot.png"), width = 800, height = 600, res = 150)
+plot(plot_data$Bamboo_Cover, plot_data$Predicted, type = "l", lwd = 2, col = "blue",
+     ylim = c(0, 1), xlab = paste("Scaled", TARGET_COVAR), ylab = "Occupancy Probability (Psi)",
+     main = "Predicted Occupancy Probability")
+lines(plot_data$Bamboo_Cover, plot_data$lower, type = "l", lty = 2, col = "gray")
+lines(plot_data$Bamboo_Cover, plot_data$upper, type = "l", lty = 2, col = "gray")
+dev.off()
+
+cat("Predictive plot saved to working directory as 'occupancy_probability_plot.png'.\n")
+cat("--- Workflow Complete! ---\n")
