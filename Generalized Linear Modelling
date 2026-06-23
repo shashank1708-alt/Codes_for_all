@@ -1,0 +1,99 @@
+
+  # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+# Automated package installation and loading
+required_packages <- c("tidyverse", "car", "MuMIn", "pROC", "performance")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Set working directory dynamically using relative paths
+# Buyers just change this single path to match their local project folder
+ROOT_DIR <- getwd() 
+DATA_PATH <- "C:\\Users\\voice\\Downloads\\sample_field_data.csv"
+
+# ---- 1. DATA LOADING & PREPROCESSING ----
+cat("--- Loading and preparing field dataset... \n")
+
+if (!file.exists(DATA_PATH)) {
+  stop("Data file not found! Please ensure 'sample_field_data.csv' is in your working directory.")
+}
+
+raw_data <- read.csv(DATA_PATH)
+
+# Identify response and predictor columns dynamically
+# Change these strings to match your dataset column headers
+RESPONSE_VAR   <- "Presence"      # e.g., 'Presence' (0/1) or 'Encounter_Rate' (counts)
+PREDICTOR_VARS <- c("Elevation", "Canopy_Cover", "Dist_to_Road", "NDVI")
+
+# Subset and scale predictors to ensure stable model convergence
+analysis_data <- raw_data %>%
+  select(all_of(c(RESPONSE_VAR, PREDICTOR_VARS))) %>%
+  drop_na() %>%
+  mutate(across(all_of(PREDICTOR_VARS), ~as.numeric(scale(.)), .names = "scaled_{.col}"))
+
+SCALED_PREDICTORS <- paste0("scaled_", PREDICTOR_VARS)
+
+# ---- 2. MULTICOLLINEARITY CHECK (VIF) ----
+cat("--- Checking for multi-collinearity via Variance Inflation Factor (VIF)... \n")
+
+# Run a preliminary full linear model to calculate VIF values
+vif_formula <- as.formula(paste(RESPONSE_VAR, "~", paste(SCALED_PREDICTORS, collapse = " + ")))
+full_lm     <- lm(vif_formula, data = analysis_data)
+vif_results <- car::vif(full_lm)
+
+print(vif_results)
+
+# Rule of thumb warning: VIF > 5 indicates high collinearity
+high_vif <- names(vif_results[vif_results > 5])
+if(length(high_vif) > 0) {
+  warning(paste("High collinearity detected in variables:", paste(high_vif, collapse = ", "), 
+                "\nConsider removing one or more of these variables before proceeding."))
+}
+
+# ---- 3. MODEL FITTING & AUTO-SELECTION ----
+cat("--- Fitting Global Generalized Linear Model... \n")
+
+# Determine error family based on data type
+# Binomial for 0/1 data; Poisson/quasipoisson for count data
+error_family <- if(all(analysis_data[[RESPONSE_VAR]] %in% c(0, 1))) binomial(link = "logit") else poisson(link = "log")
+
+global_formula <- as.formula(paste(RESPONSE_VAR, "~", paste(SCALED_PREDICTORS, collapse = " + ")))
+
+global_model <- glm(global_formula, data = analysis_data, family = error_family)
+summary(global_model)
+
+cat("--- Running automated model selection via AICc... \n")
+options(na.action = "na.fail") # Required rule for MuMIn's dredge function
+model_dredge <- MuMIn::dredge(global_model, rank = "AICc")
+print(head(model_dredge, 5))
+
+# Extract top-performing model (lowest AICc)
+best_model <- MuMIn::get.models(model_dredge, 1)[[1]]
+cat("\n=== BEST MODEL SUMMARY ===\n")
+print(summary(best_model))
+
+# ---- 4. PERFORMANCE EVALUATION ----
+cat("--- Evaluating model fit metrics... \n")
+
+# Calculate McFadden's Pseudo R-Squared
+pseudo_r2 <- performance::r2_mcfadden(best_model)
+cat(paste("McFadden Pseudo R2:", round(as.numeric(pseudo_r2), 4), "\n"))
+
+# If model is binary/logistic, calculate Area Under the ROC Curve (AUC)
+if(identical(error_family$family, "binomial")) {
+  analysis_data$predicted_prob <- predict(best_model, type = "response")
+  roc_curve <- pROC::roc(analysis_data[[RESPONSE_VAR]], analysis_data$predicted_prob, quiet = TRUE)
+  cat(paste("Model AUC Score:", round(pROC::auc(roc_curve), 4), "\n"))
+  
+  # Plot and save ROC Curve
+  png(file.path(ROOT_DIR, "model_roc_curve.png"), width = 800, height = 800, res = 150)
+  plot(roc_curve, main = "Model ROC Curve", col = "darkgreen", lwd = 2)
+  abline(a = 0, b = 1, lty = 2, col = "gray")
+  dev.off()
+  cat("ROC curve graphic saved to working directory as 'model_roc_curve.png'.\n")
+}
+
+cat("--- Workflow Complete! ---\n")
