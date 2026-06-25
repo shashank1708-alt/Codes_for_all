@@ -1,4 +1,3 @@
-# Codes_for_all
 # 🌿 Spatial Ecology R-Suite: Automated Workflows for Field Biologists
 
 > **Stop fighting with R syntax and get back to the science.** This repository contains a suite of automated, production-ready R scripts designed to streamline data wrangling, spatial preprocessing, and statistical modeling for field biologists, ecologists, and conservation researchers. 
