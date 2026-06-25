@@ -1,0 +1,109 @@
+ # ---- 0. ENVIRONMENT SETUP & PACKAGES ----
+required_packages <- c("tidyverse", "MuMIn", "car")
+missing_packages  <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+ROOT_DIR <- getwd() 
+DATA_PATH <- ("C:\\Users\\voice\\Downloads\\multi_model_data.csv")
+
+cat("====================================================\n")
+cat("WORKING DIRECTORY (Your files will save here):\n")
+cat(">>", normalizePath(ROOT_DIR, mustWork = FALSE), "<<\n")
+cat("====================================================\n\n")
+
+# ---- 1. DATA LOADING & PREP ----
+cat("--- Loading survey data... \n")
+if (!file.exists(DATA_PATH)) stop("Data file not found! Please check the Working Directory.")
+
+raw_data <- read.csv(DATA_PATH)
+
+# Standardize (scale) continuous predictors so their coefficients are comparable
+clean_data <- raw_data %>%
+  mutate(across(c(Elevation, Forest_Cover, Water_Dist, Human_Dist), ~scale(.)[,1]))
+
+# ---- 2. THE GLOBAL MODEL ----
+cat("--- Fitting the Global Model... \n")
+
+# CRITICAL STEP: Multi-model inference requires 'na.fail' to prevent 
+# models from being fit to different subsets of data if NAs are present.
+options(na.action = "na.fail")
+
+# We use a Poisson GLM here because our response variable is 'Abundance' (counts).
+# If it were Presence/Absence (1/0), you would change family to binomial(link="logit").
+global_model <- glm(Abundance ~ Elevation + Forest_Cover + Water_Dist + Human_Dist, 
+                    family = poisson(link = "log"), 
+                    data = clean_data)
+
+# Check for multi-collinearity in the global model
+cat("Checking VIF (Variance Inflation Factor). Values > 3 indicate issues:\n")
+print(car::vif(global_model))
+
+# ---- 3. MULTI-MODEL DREDGING ----
+cat("\n--- Running all possible model combinations (Dredging)... \n")
+
+# dredge() tests every single combination of the variables in the global model
+model_set <- MuMIn::dredge(global_model, rank = "AICc")
+
+cat("\n=== TOP 5 MODELS BY AICc ===\n")
+print(head(model_set, 5))
+
+# ---- 4. MODEL AVERAGING ----
+cat("\n--- Performing Model Averaging on the Top Model Set... \n")
+
+# We subset to only include "competitive" models (typically Delta AICc < 2)
+# These are the models that are statistically indistinguishable from the "best" model.
+top_models <- get.models(model_set, subset = delta < 2)
+
+if(length(top_models) == 1) {
+  cat("\nOnly ONE model has a Delta AICc < 2. Averaging is not necessary. The top model is definitive.\n")
+  avg_model <- top_models[[1]]
+  importance_df <- data.frame(Variable = names(coef(avg_model))[-1], Importance = 1)
+} else {
+  cat(paste("\nFound", length(top_models), "competitive models. Averaging coefficients...\n"))
+  avg_model <- MuMIn::model.avg(top_models)
+  
+  cat("\n=== AVERAGED COEFFICIENTS ===\n")
+  print(summary(avg_model)$coefmat.full)
+  
+  # Extract Relative Variable Importance (RVI)
+  # This tells you the probability that a variable is actually important across all top models
+  var_imp <- MuMIn::sw(avg_model)
+  importance_df <- data.frame(
+    Variable = names(var_imp),
+    Importance = as.numeric(var_imp)
+  )
+}
+
+# ---- 5. PLOTTING VARIABLE IMPORTANCE ----
+cat("--- Generating Relative Variable Importance Plot... \n")
+
+# Sort for plotting
+importance_df <- importance_df %>% arrange(Importance)
+
+# Save the plot
+plot_path <- file.path(ROOT_DIR, "Variable_Importance_Plot.png")
+png(plot_path, width = 800, height = 600, res = 150)
+
+# Create a clean horizontal barplot
+par(mar = c(5, 8, 4, 2)) # Adjust margins so variable names fit
+barplot(importance_df$Importance, 
+        names.arg = importance_df$Variable, 
+        horiz = TRUE, 
+        las = 1, 
+        col = "steelblue", 
+        xlim = c(0, 1),
+        xlab = "Relative Variable Importance (RVI)",
+        main = "Drivers of Wildlife Abundance")
+abline(v = 0.8, col = "red", lty = 2) # Add a threshold line (often variables > 0.8 are considered strong)
+
+dev.off()
+
+cat(paste("\nSaved Variable Importance Plot to:\n>>", normalizePath(plot_path, mustWork = FALSE), "<<\n"))
+cat("--- Workflow Complete! ---\n")
+
+# Reset NA action to default just to be safe for future R sessions
+options(na.action = "na.omit")
