@@ -8,7 +8,7 @@ if(length(missing_packages) > 0) {
 invisible(lapply(required_packages, library, character.only = TRUE))
 
 ROOT_DIR <- getwd() 
-DATA_PATH <- ("C:\\Users\\voice\\Downloads\\multi_model_data.csv")
+DATA_PATH <- ("multi_model_data.csv")
 
 cat("====================================================\n")
 cat("WORKING DIRECTORY (Your files will save here):\n")
